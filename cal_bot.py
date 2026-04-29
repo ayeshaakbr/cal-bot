@@ -56,20 +56,21 @@ def save_workouts(workouts):
     with open(WORKOUTS_FILE, "w") as f:
         json.dump(workouts, f, indent=2)
 
-def log_workout(user_id: str, exercise: str, weight: float, reps: int, sets: int) -> bool:
+def log_workout(user_id: str, exercise: str, weight: float, reps: int, sets: int, guild_id: str = None) -> bool:
     """Log a workout for a user."""
     try:
         workouts = load_workouts()
         if user_id not in workouts:
             workouts[user_id] = []
-        
+
         workout_entry = {
             "date": datetime.now().isoformat(),
             "exercise": exercise.title(),
             "weight": weight,
             "reps": reps,
             "sets": sets,
-            "total_volume": weight * reps * sets  # weight × reps × sets
+            "total_volume": weight * reps * sets,  # weight × reps × sets
+            "guild_id": guild_id,
         }
         workouts[user_id].append(workout_entry)
         save_workouts(workouts)
@@ -102,7 +103,7 @@ def get_exercise_stats(user_id: str, exercise: str) -> dict:
         "max_weight": max_weight,
         "avg_reps": avg_reps,
         "total_volume": total_volume,
-        "last_date": exercise_logs[0]["date"]
+        "last_date": max(exercise_logs, key=lambda x: x["date"])["date"]
     }
 
 # ── USDA FoodData Central API Integration ───────────────────────────────────
@@ -118,7 +119,7 @@ async def search_calories(food_name: str) -> discord.Embed | None:
             color=0xFF0000
         )
     
-    url = "https://fdc.nal.usda.gov/api/foods/search"
+    url = "https://api.nal.usda.gov/fdc/v1/foods/search"
     params = {
         "query": food_name,
         "pageSize": 5,
@@ -209,7 +210,6 @@ STRENGTH_STANDARDS = {
     "deadlift": {150: 225, 170: 315, 190: 405, 210: 495},
     "overhead press": {150: 85, 170: 115, 190: 135, 210: 165},
     "bent row": {150: 135, 170: 185, 190: 225, 210: 275},
-    "squat": {150: 185, 170: 275, 190: 315, 210: 365},
 }
 
 # ── Achievement Definitions ─────────────────────────────────────────────────
@@ -251,11 +251,10 @@ def calculate_streak(user_id: str) -> tuple:
     if not workout_dates:
         return (0, 0)
     
-    current_streak = 0
-    max_streak = 0
+    max_streak = 1
     temp_streak = 1
-    
-    for i in range(len(workout_dates) - 1, 0, -1):
+
+    for i in range(1, len(workout_dates)):
         diff = (workout_dates[i] - workout_dates[i-1]).days
         if diff == 1:
             temp_streak += 1
@@ -264,15 +263,13 @@ def calculate_streak(user_id: str) -> tuple:
         else:
             max_streak = max(max_streak, temp_streak)
             temp_streak = 1
-    
+
     max_streak = max(max_streak, temp_streak)
-    
-    # Check if streak is still active (last workout within 24h)
-    if workout_dates:
-        days_since_last = (datetime.now().date() - workout_dates[-1]).days
-        if days_since_last <= 1:
-            current_streak = temp_streak
-    
+
+    # current_streak is the most recent contiguous segment, if still active
+    days_since_last = (datetime.now().date() - workout_dates[-1]).days
+    current_streak = temp_streak if days_since_last <= 1 else 0
+
     return (current_streak, max_streak)
 
 def get_user_achievements(user_id: str) -> list:
@@ -311,20 +308,23 @@ def get_server_leaderboard(guild_id: str, metric: str = "workouts") -> list:
     """Get leaderboard for a server. metric: 'workouts' or 'volume'"""
     workouts = load_workouts()
     leaderboard = []
-    
+
     for user_id, data in workouts.items():
         workouts_list = data if isinstance(data, list) else data.get("workouts", [])
-        
-        if not workouts_list:
+
+        # Filter to only this guild's workouts
+        guild_workouts = [w for w in workouts_list if isinstance(w, dict) and w.get("guild_id") == guild_id]
+
+        if not guild_workouts:
             continue
-        
+
         if metric == "workouts":
-            score = len(workouts_list)
+            score = len(guild_workouts)
         else:  # volume
-            score = sum(w.get("total_volume", 0) for w in workouts_list if isinstance(w, dict))
-        
+            score = sum(w.get("total_volume", 0) for w in guild_workouts)
+
         leaderboard.append({"user_id": user_id, "score": score})
-    
+
     return sorted(leaderboard, key=lambda x: x["score"], reverse=True)[:10]
 
 def generate_progress_chart(user_id: str, exercise: str) -> io.BytesIO:
@@ -420,9 +420,17 @@ async def cal_command(interaction: discord.Interaction, food: str):
     if embed:
         await interaction.followup.send(embed=embed)
     else:
-        await interaction.followup.send(
-            f"😕 Couldn't find calorie info for **{food}**."
-        )
+        # Fallback to local database
+        local = CALORIE_DATABASE.get(food.lower())
+        if local:
+            fallback_embed = discord.Embed(title=f"🍽️ {food.title()}", color=0xFF6B35)
+            fallback_embed.add_field(name="Calories per 100g", value=f"**{local['calories']} kcal**", inline=True)
+            macros = [f"Protein: {local['protein']}g", f"Carbs: {local['carbs']}g", f"Fat: {local['fat']}g"]
+            fallback_embed.add_field(name="Macros (per 100g)", value=" · ".join(macros), inline=False)
+            fallback_embed.set_footer(text="via local database")
+            await interaction.followup.send(embed=fallback_embed)
+        else:
+            await interaction.followup.send(f"😕 Couldn't find calorie info for **{food}**.")
 
 
 @tree.command(name="log", description="Log a gym workout")
@@ -447,7 +455,7 @@ async def log_command(
             await interaction.response.send_message("❌ Weight, reps, and sets must be positive numbers!", ephemeral=True)
             return
         
-        success = log_workout(user_id, exercise, weight, reps, sets)
+        success = log_workout(user_id, exercise, weight, reps, sets, guild_id=str(interaction.guild.id) if interaction.guild else None)
         
         if success:
             total_volume = weight * reps * sets
@@ -642,8 +650,6 @@ async def strength_compare_command(interaction: discord.Interaction, exercise: s
     embed.add_field(name="Your Max", value=f"{stats['max_weight']} lbs", inline=True)
     
     if standards:
-        # Find closest bodyweight standard
-        closest_std = min(standards.values())
         embed.add_field(name="Standard (170 lbs)", value=f"{standards.get(170, 'N/A')} lbs", inline=True)
         
         user_max = stats['max_weight']
