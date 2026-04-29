@@ -1,6 +1,6 @@
-# Discord Calorie & Fitness Bot - Slash Commands
+# Discord Calorie & Fitness Bot 
 
-Your bot now uses **Discord Slash Commands** with interactive parameter fields!
+
 
 ## Commands
 
