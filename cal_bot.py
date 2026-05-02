@@ -33,6 +33,7 @@ load_dotenv()
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 USDA_API_KEY = os.getenv("USDA_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 WORKOUTS_FILE = "workouts.json"
 
 if not BOT_TOKEN:
@@ -745,6 +746,70 @@ async def leaderboard_command(interaction: discord.Interaction, metric: str = "w
         embed.add_field(name=f"{medal} {user_name}", value=score_text, inline=False)
     
     await interaction.response.send_message(embed=embed)
+
+
+# ── Gemini Food Image Analysis ───────────────────────────────────────────────
+async def analyze_food_image(image_url: str, content_type: str) -> discord.Embed:
+    if not GEMINI_API_KEY:
+        return discord.Embed(
+            title="❌ API Key Missing",
+            description="GEMINI_API_KEY not configured. Add it to your .env file",
+            color=0xFF0000
+        )
+
+    try:
+        import google.generativeai as genai
+
+        img_response = requests.get(image_url, timeout=10)
+        img_response.raise_for_status()
+        img_bytes = img_response.content
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        prompt = (
+            "Analyze this food image and provide:\n"
+            "1. Food item(s) identified\n"
+            "2. Estimated serving size\n"
+            "3. Estimated calories\n"
+            "4. Estimated macros: protein (g), carbs (g), fat (g)\n\n"
+            "Be concise. If multiple items are visible, list the main ones.\n"
+            "Format your response exactly like this:\n"
+            "**Food:** [name]\n"
+            "**Serving:** [size]\n"
+            "**Calories:** [number] kcal\n"
+            "**Protein:** [g]g | **Carbs:** [g]g | **Fat:** [g]g\n\n"
+            "Note: These are estimates based on visual analysis."
+        )
+
+        response = model.generate_content([prompt, {"mime_type": content_type, "data": img_bytes}])
+
+        embed = discord.Embed(
+            title="📸 Food Scan Results",
+            description=response.text,
+            color=0xFF6B35
+        )
+        embed.set_footer(text="Estimates via Google Gemini AI · Results may vary")
+        return embed
+
+    except Exception as e:
+        return discord.Embed(
+            title="❌ Scan Error",
+            description=f"Could not analyze image: {str(e)}",
+            color=0xFF0000
+        )
+
+
+@tree.command(name="scan", description="Scan a food photo to estimate calories and macros")
+@app_commands.describe(image="Upload a photo of your food")
+async def scan_command(interaction: discord.Interaction, image: discord.Attachment):
+    if not image.content_type or not image.content_type.startswith("image/"):
+        await interaction.response.send_message("❌ Please upload an image file.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    embed = await analyze_food_image(image.url, image.content_type)
+    await interaction.followup.send(embed=embed)
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
