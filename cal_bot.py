@@ -828,6 +828,7 @@ async def scan_command(interaction: discord.Interaction, image: discord.Attachme
 
     await interaction.response.defer()
     embed = await analyze_food_image(image.url, image.content_type)
+    embed.set_image(url=image.url)
     await interaction.followup.send(embed=embed)
 
 
