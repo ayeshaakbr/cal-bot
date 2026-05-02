@@ -779,7 +779,7 @@ async def analyze_food_image(image_url: str, content_type: str) -> discord.Embed
         )
 
         payload = {
-            "model": "google/gemini-2.0-flash-exp:free",
+            "model": "openrouter/auto",
             "messages": [
                 {
                     "role": "user",
