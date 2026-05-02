@@ -26,6 +26,7 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import io
+import base64
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,7 +34,7 @@ load_dotenv()
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 USDA_API_KEY = os.getenv("USDA_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 WORKOUTS_FILE = "workouts.json"
 
 if not BOT_TOKEN:
@@ -748,24 +749,19 @@ async def leaderboard_command(interaction: discord.Interaction, metric: str = "w
     await interaction.response.send_message(embed=embed)
 
 
-# ── Gemini Food Image Analysis ───────────────────────────────────────────────
+# ── OpenRouter Food Image Analysis ──────────────────────────────────────────
 async def analyze_food_image(image_url: str, content_type: str) -> discord.Embed:
-    if not GEMINI_API_KEY:
+    if not OPENROUTER_API_KEY:
         return discord.Embed(
             title="❌ API Key Missing",
-            description="GEMINI_API_KEY not configured. Add it to your .env file",
+            description="OPENROUTER_API_KEY not configured. Add it to your .env file",
             color=0xFF0000
         )
 
     try:
-        import google.generativeai as genai
-
         img_response = requests.get(image_url, timeout=10)
         img_response.raise_for_status()
-        img_bytes = img_response.content
-
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        img_b64 = base64.b64encode(img_response.content).decode("utf-8")
 
         prompt = (
             "Analyze this food image and provide:\n"
@@ -782,14 +778,37 @@ async def analyze_food_image(image_url: str, content_type: str) -> discord.Embed
             "Note: These are estimates based on visual analysis."
         )
 
-        response = model.generate_content([prompt, {"mime_type": content_type, "data": img_bytes}])
+        payload = {
+            "model": "google/gemini-2.0-flash-exp:free",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{img_b64}"}}
+                    ]
+                }
+            ]
+        }
+
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=30
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"]
 
         embed = discord.Embed(
             title="📸 Food Scan Results",
-            description=response.text,
+            description=text,
             color=0xFF6B35
         )
-        embed.set_footer(text="Estimates via Google Gemini AI · Results may vary")
+        embed.set_footer(text="Estimates via OpenRouter AI · Results may vary")
         return embed
 
     except Exception as e:
