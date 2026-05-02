@@ -765,7 +765,7 @@ async def analyze_food_image(image_url: str, content_type: str) -> discord.Embed
         img_bytes = img_response.content
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
 
         prompt = (
             "Analyze this food image and provide:\n"
