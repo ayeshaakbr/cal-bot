@@ -17,6 +17,7 @@ Setup:
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 import requests
 import os
 import sys
@@ -36,6 +37,8 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 USDA_API_KEY = os.getenv("USDA_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 WORKOUTS_FILE = "workouts.json"
+DIARY_FILE = "diary.json"
+PROFILES_FILE = "profiles.json"
 
 if not BOT_TOKEN:
     print("❌ DISCORD_BOT_TOKEN is not set.")
@@ -57,6 +60,32 @@ def save_workouts(workouts):
     """Save workouts to JSON file."""
     with open(WORKOUTS_FILE, "w") as f:
         json.dump(workouts, f, indent=2)
+
+def load_diary():
+    if os.path.exists(DIARY_FILE):
+        try:
+            with open(DIARY_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_diary(diary):
+    with open(DIARY_FILE, "w") as f:
+        json.dump(diary, f, indent=2)
+
+def load_profiles():
+    if os.path.exists(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_profiles(profiles):
+    with open(PROFILES_FILE, "w") as f:
+        json.dump(profiles, f, indent=2)
 
 def log_workout(user_id: str, exercise: str, weight: float, reps: int, sets: int, guild_id: str = None) -> bool:
     """Log a workout for a user."""
@@ -399,12 +428,26 @@ CALORIE_DATABASE = {
 
 
 
+# ── Background Tasks ─────────────────────────────────────────────────────────
+@tasks.loop(minutes=1)
+async def check_reminders():
+    profiles = load_profiles()
+    now = datetime.now().strftime("%H:%M")
+    for user_id, profile in profiles.items():
+        if profile.get("reminder_time") == now:
+            try:
+                user = await client.fetch_user(int(user_id))
+                await user.send("⏰ Time to log your workout! Use `/log` to track your progress today. 💪")
+            except:
+                pass
+
 # ── Events ───────────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
     try:
         synced = await tree.sync()
         print(f"✅ Logged in as {client.user} — Synced {len(synced)} command(s)")
+        check_reminders.start()
     except Exception as e:
         print(f"❌ Error syncing commands: {e}")
 
@@ -747,6 +790,153 @@ async def leaderboard_command(interaction: discord.Interaction, metric: str = "w
         embed.add_field(name=f"{medal} {user_name}", value=score_text, inline=False)
     
     await interaction.response.send_message(embed=embed)
+
+
+# ── Goal Command ─────────────────────────────────────────────────────────────
+@tree.command(name="goal", description="Set or view your daily calorie goal")
+@app_commands.describe(calories="Your daily calorie goal (leave empty to view progress)")
+async def goal_command(interaction: discord.Interaction, calories: int = None):
+    user_id = str(interaction.user.id)
+    profiles = load_profiles()
+    if user_id not in profiles:
+        profiles[user_id] = {}
+
+    if calories is not None:
+        profiles[user_id]["goal_calories"] = calories
+        save_profiles(profiles)
+        embed = discord.Embed(
+            title="🎯 Goal Set!",
+            description=f"Your daily calorie goal is now **{calories} kcal**",
+            color=0x00FF00
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        goal = profiles[user_id].get("goal_calories")
+        if not goal:
+            await interaction.response.send_message("No goal set. Use `/goal <calories>` to set one.", ephemeral=True)
+            return
+
+        diary = load_diary()
+        today = datetime.now().date().isoformat()
+        today_entries = diary.get(user_id, {}).get(today, [])
+        total = sum(e["calories"] for e in today_entries)
+        remaining = max(0, goal - total)
+        progress = min(total / goal, 1.0)
+        bar = "█" * int(progress * 10) + "░" * (10 - int(progress * 10))
+
+        embed = discord.Embed(title="🎯 Daily Calorie Goal", color=0xFF6B35)
+        embed.add_field(name="Goal", value=f"{goal} kcal", inline=True)
+        embed.add_field(name="Consumed", value=f"{total} kcal", inline=True)
+        embed.add_field(name="Remaining", value=f"{remaining} kcal", inline=True)
+        embed.add_field(name="Progress", value=f"`{bar}` {round(progress * 100)}%", inline=False)
+        await interaction.response.send_message(embed=embed)
+
+
+# ── Diary Command ─────────────────────────────────────────────────────────────
+@tree.command(name="diary", description="Log a meal or view today's food diary")
+@app_commands.describe(food="Food name (leave empty to view today's diary)", calories="Estimated calories")
+async def diary_command(interaction: discord.Interaction, food: str = None, calories: int = None):
+    user_id = str(interaction.user.id)
+    diary = load_diary()
+    today = datetime.now().date().isoformat()
+
+    if user_id not in diary:
+        diary[user_id] = {}
+    if today not in diary[user_id]:
+        diary[user_id][today] = []
+
+    if food and calories is not None:
+        diary[user_id][today].append({
+            "food": food,
+            "calories": calories,
+            "time": datetime.now().strftime("%I:%M %p")
+        })
+        save_diary(diary)
+
+        total = sum(e["calories"] for e in diary[user_id][today])
+        profiles = load_profiles()
+        goal = profiles.get(user_id, {}).get("goal_calories")
+
+        embed = discord.Embed(title="🍽️ Meal Logged!", color=0x00FF00)
+        embed.add_field(name="Food", value=food, inline=True)
+        embed.add_field(name="Calories", value=f"{calories} kcal", inline=True)
+        embed.add_field(name="Today's Total", value=f"{total} kcal", inline=True)
+        if goal:
+            embed.add_field(name="Goal Remaining", value=f"{max(0, goal - total)} kcal", inline=False)
+        await interaction.response.send_message(embed=embed)
+    else:
+        entries = diary[user_id].get(today, [])
+        if not entries:
+            await interaction.response.send_message("📋 No meals logged today. Use `/diary <food> <calories>` to add one.", ephemeral=True)
+            return
+
+        total = sum(e["calories"] for e in entries)
+        embed = discord.Embed(title="📋 Today's Food Diary", color=0x3498DB, description=today)
+        for entry in entries:
+            embed.add_field(name=entry["food"], value=f"{entry['calories']} kcal · {entry['time']}", inline=False)
+        embed.add_field(name="Total", value=f"**{total} kcal**", inline=False)
+
+        profiles = load_profiles()
+        goal = profiles.get(user_id, {}).get("goal_calories")
+        if goal:
+            embed.add_field(name="Goal", value=f"{goal} kcal ({max(0, goal - total)} remaining)", inline=False)
+        await interaction.response.send_message(embed=embed)
+
+
+# ── Delete Last Command ───────────────────────────────────────────────────────
+@tree.command(name="delete_last", description="Delete your last logged workout")
+async def delete_last_command(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    workouts = load_workouts()
+    user_workouts = workouts.get(user_id, [])
+
+    if not user_workouts or not isinstance(user_workouts, list):
+        await interaction.response.send_message("No workouts to delete.", ephemeral=True)
+        return
+
+    latest_idx = max(range(len(user_workouts)), key=lambda i: user_workouts[i].get("date", ""))
+    deleted = user_workouts.pop(latest_idx)
+    workouts[user_id] = user_workouts
+    save_workouts(workouts)
+
+    embed = discord.Embed(
+        title="🗑️ Workout Deleted",
+        description=f"Removed **{deleted['exercise']}** — {deleted['weight']} lbs × {deleted['reps']}×{deleted['sets']}",
+        color=0xFF0000
+    )
+    embed.set_footer(text=f"Logged at {datetime.fromisoformat(deleted['date']).strftime('%m/%d %I:%M %p')}")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── Reminder Command ──────────────────────────────────────────────────────────
+@tree.command(name="reminder", description="Set a daily DM reminder to log your workout")
+@app_commands.describe(time="Time in HH:MM format (e.g. 20:00), or 'off' to disable")
+async def reminder_command(interaction: discord.Interaction, time: str):
+    user_id = str(interaction.user.id)
+    profiles = load_profiles()
+    if user_id not in profiles:
+        profiles[user_id] = {}
+
+    if time.lower() == "off":
+        profiles[user_id].pop("reminder_time", None)
+        save_profiles(profiles)
+        await interaction.response.send_message("⏰ Reminder disabled.", ephemeral=True)
+        return
+
+    try:
+        datetime.strptime(time, "%H:%M")
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid format. Use HH:MM (e.g. `20:00`)", ephemeral=True)
+        return
+
+    profiles[user_id]["reminder_time"] = time
+    save_profiles(profiles)
+    embed = discord.Embed(
+        title="⏰ Reminder Set!",
+        description=f"You'll get a daily DM at **{time}** (server time) to log your workout.",
+        color=0x00FF00
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ── OpenRouter Food Image Analysis ──────────────────────────────────────────
